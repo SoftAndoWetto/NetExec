@@ -24,4 +24,13 @@ def proto_args(parser, parents):
     cgroup.add_argument("--clipboard-delay", type=int, default=30, help="Maximum time to wait for clipboard initialization (seconds)")
     cgroup.add_argument("--no-output", action="store_true", help="do not retrieve command output")
 
+    fgroup = rdp_parser.add_argument_group("File Transfer")
+    fgroup.add_argument(
+        "--put-file",
+        nargs=2,
+        metavar=("LOCAL", "REMOTE"),
+        dest="put_file",
+        help="upload a local file to the remote host",
+    )
+
     return parser

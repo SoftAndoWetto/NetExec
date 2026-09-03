@@ -627,3 +627,73 @@ class rdp(connection):
     def nla_screenshot(self):
         if not self.nla:
             asyncio.run(self.nla_screen())
+
+    def put_file(self, local_path=None, remote_path=None):
+        local_path = local_path if local_path else self.args.put_file[0]
+        remote_path = remote_path if remote_path else self.args.put_file[1]
+
+        remote_path += ntpath.basename(
+            local_path) if remote_path.endswith(("\\", "/")) else ""
+
+        filename = os.path.basename(local_path)
+        share_name = gen_random_string(8).upper()
+        smb_dir = tempfile.mkdtemp(prefix="nxc_rdp_")
+        smb_server = None
+        server_thread = None
+
+        try:
+            self.logger.display(f'Uploading "{local_path}" to "{remote_path}"')
+
+            shutil.copy2(local_path, os.path.join(smb_dir, filename))
+
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect((self.host, 445))
+                smb_ip = sock.getsockname()[0]
+
+            self.logger.debug(f"Using local SMB IP: {smb_ip}")
+            smb_server = SimpleSMBServer(listenAddress=smb_ip, listenPort=445)
+            smb_server.setSMB2Support(True)
+            smb_server.setLogFile("None")
+            smb_server.addShare(share_name, smb_dir, readOnly="yes")
+
+            server_thread = threading.Thread(
+                target=smb_server.start, daemon=True)
+            server_thread.start()
+
+            smb_path = f"\\\\{smb_ip}\\{share_name}\\{filename}"
+
+            copy_cmd = f"Copy-Item -LiteralPath '{smb_path}' -Destination '{remote_path}' -Force"
+            self.logger.debug(f"Running: {copy_cmd}")
+            asyncio.run(self.execute_shell(
+                copy_cmd, get_output=False, shell_type="powershell"))
+
+            check_cmd = f"Test-Path -LiteralPath '{remote_path}'"
+            self.logger.debug(f"Verifying: {check_cmd}")
+            check_output = asyncio.run(self.execute_shell(
+                check_cmd, get_output=True, shell_type="powershell"))
+
+            if check_output and "True" in check_output:
+                self.logger.success(
+                    f'File "{local_path}" uploaded to "{remote_path}"')
+            else:
+                self.logger.fail(
+                    f'Upload of "{local_path}" to "{remote_path}" failed — '
+                    f"file not found on target after transfer"
+                )
+
+        except Exception as e:
+            self.logger.fail(
+                f'Failed to upload "{local_path}" to "{remote_path}": {e!s}')
+
+        finally:
+            if smb_server is not None:
+                try:
+                    smb_server.getServer().shutdown()
+                except Exception as e:
+                    self.logger.debug(
+                        f"SMB server shutdown error (non-fatal): {e!s}")
+
+            if server_thread is not None:
+                server_thread.join(timeout=3)
+
+            shutil.rmtree(smb_dir, ignore_errors=True)

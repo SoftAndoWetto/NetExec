@@ -160,6 +160,8 @@ class ldap(connection):
                 self.signing_required = True
             else:
                 self.logger.debug(f"LDAPSessionError while checking for signing requirements (likely NTLM disabled): {e!s}")
+        except OSError as e:
+            self.logger.debug(f"Connection error while checking LDAP signing on {self.host}: {e!s}")
 
     def check_ldaps_cbt(self):
         self.cbt_status = "Never"
@@ -1223,22 +1225,21 @@ class ldap(connection):
         self.logger.debug(f"Querying LDAP server with filter: {search_filter} and attributes: {attributes}")
         try:
             resp = self.search(search_filter, attributes, 0)
-            resp_parsed = parse_result_attributes(resp)
         except LDAPFilterSyntaxError as e:
             self.logger.fail(f"LDAP Filter Syntax Error: {e}")
             return
-        for idx, entry in enumerate(resp_parsed):
-            if not isinstance(resp[idx], ldapasn1_impacket.SearchResultEntry):
-                idx += 1  # Skip non-entry responses
-            self.logger.success(f"Response for object: {resp[idx]['objectName']}")
-            for attribute in entry:
-                if isinstance(entry[attribute], list) and entry[attribute]:
+        # A search response also holds SearchResultReference objects, which carry no attributes and must not be indexed like an entry.
+        entries = [item for item in resp if isinstance(item, ldapasn1_impacket.SearchResultEntry)]
+        for entry, attribute_map in zip(entries, parse_result_attributes(entries), strict=True):
+            self.logger.success(f"Response for object: {entry['objectName']}")
+            for attribute, value in attribute_map.items():
+                if isinstance(value, list) and value:
                     # Display first item in the same line as attribute
-                    self.logger.highlight(f"{attribute:<20} {entry[attribute].pop(0)}")
-                    for item in entry[attribute]:
+                    self.logger.highlight(f"{attribute:<20} {value.pop(0)}")
+                    for item in value:
                         self.logger.highlight(f"{'':<20} {item}")
                 else:
-                    self.logger.highlight(f"{attribute:<20} {entry[attribute]}")
+                    self.logger.highlight(f"{attribute:<20} {value}")
 
     def find_delegation(self):
         def printTable(items, header):
@@ -1730,6 +1731,7 @@ class ldap(connection):
                 aeskey=self.aesKey,
                 kdc=self.kdcHost,
                 auth_method="auto",
+                ldap_channel_binding=self.cbt_status == "Always"
             )
             ad = AD(
                 auth=auth,
@@ -1768,9 +1770,13 @@ class ldap(connection):
                     exclude_dcs=False,
                 )
             except Exception as e:
-                self.logger.fail(f"BloodHound collection failed: {e.__class__.__name__} - {e}")
-                self.logger.debug(f"BloodHound collection failed: {e.__class__.__name__} - {e}", exc_info=True)
-                return
+                if "ldap3-bleeding-edge" in str(e):
+                    self.logger.fail("Bloodhound collection failed due to channel binding requirements. Inject 'ldap3-bleeding-edge': pipx inject netexec ldap3-bleeding-edge")
+                    return
+                else:
+                    self.logger.fail(f"BloodHound collection failed: {e.__class__.__name__} - {e}")
+                    self.logger.debug(f"BloodHound collection failed: {e.__class__.__name__} - {e}", exc_info=True)
+                    return
 
         # Collect ADCS data using CertiHound if requested
         if "adcs" in collect:
